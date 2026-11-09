@@ -1,12 +1,12 @@
 # ==============================================================
-# Cell 8.2 | Write the Streamlit app
+# Cell L.7 | Streamlit app with the brochure action (Case 1)
 # --------------------------------------------------------------
-# Purpose : Create the web app served by Streamlit Community Cloud: a form
-#           generated from the model's input schema, the inputs collected
-#           in a DataFrame, a prediction with the model's own threshold,
-#           batch scoring of a CSV and a model card in the sidebar.
-# Input   : None (the app reads tourism_model.joblib and metrics.json next
-#           to it, or from the folder in env var TOURISM_MODEL_DIR)
+# Purpose : Same app as the submitted version, plus Case 1: every customer
+#           gets one of three actions (call / send brochure / no action);
+#           the batch tab summarises the list per action, and the sidebar
+#           shows the business rule next to the model card.
+# Input   : None (the app reads tourism_model.joblib, metrics.json and
+#           business_rules.json next to it, or from TOURISM_MODEL_DIR)
 # Output  : tourism_project/deployment/app.py
 # ==============================================================
 import os
@@ -15,7 +15,8 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from scoring import load_bundle, load_report_card, out_of_range, rank_call_list, score, validate
+from scoring import (BROCHURE, CALL, NO_ACTION, load_bundle, load_report_card, load_rules, out_of_range,
+                     rank_call_list, score, validate)
 
 MODEL_DIR = Path(os.environ.get("TOURISM_MODEL_DIR", Path(__file__).resolve().parent))
 
@@ -54,6 +55,7 @@ def get_bundle(model_version):
 model_file = MODEL_DIR / "tourism_model.joblib"
 bundle = get_bundle(model_file.stat().st_mtime if model_file.exists() else None)
 card = load_report_card(MODEL_DIR)
+rules = load_rules(MODEL_DIR)
 st.title("Wellness Tourism Package - Purchase Prediction")
 st.caption("Visit with Us | scores customers before the first sales call")
 
@@ -76,6 +78,15 @@ with st.sidebar:
                f"commit {str(bundle.get('git_sha', 'local'))[:7]} | Python {bundle['versions']['python']}")
     if card:
         st.caption(f"Last pipeline decision: {card['last_decision']}")
+    st.header("Business rule")
+    floor = rules.get("brochure_min_probability")
+    if floor is None:
+        st.write("Below the threshold: no action.")
+    else:
+        st.write(f"**Call:** probability \u2265 {bundle['threshold']:.2f}  \n"
+                 f"**Send brochure:** {floor:.2f} \u2264 probability < {bundle['threshold']:.2f}  \n"
+                 f"**No action:** probability < {floor:.2f}")
+        st.caption(rules.get("note", ""))
 
 single, batch = st.tabs(["Score one customer", "Score a customer list (CSV)"])
 
@@ -108,13 +119,16 @@ with single:
         st.dataframe(input_df, hide_index=True, use_container_width=True)
         for note in out_of_range(bundle, input_df):           # only free-typed numbers can leave the range
             st.warning(note)
-        result = score(bundle, input_df).iloc[0]
+        result = score(bundle, input_df, rules).iloc[0]
         p, t = result["purchase_probability"], bundle["threshold"]
         st.subheader("Prediction")
-        if result["recommendation"] == "call":
+        if result["recommendation"] == CALL:
             st.success(f"Likely buyer - recommend a call. Purchase probability {p:.1%} (threshold {t:.0%}).")
+        elif result["recommendation"] == BROCHURE:
+            st.warning(f"Close to the threshold - send the wellness brochure. Purchase probability {p:.1%} "
+                       f"(brochure band {rules['brochure_min_probability']:.0%}-{t:.0%}).")
         else:
-            st.info(f"Unlikely buyer - lower priority. Purchase probability {p:.1%} (threshold {t:.0%}).")
+            st.info(f"Unlikely buyer - no action for now. Purchase probability {p:.1%} (threshold {t:.0%}).")
         st.progress(float(min(p, 1.0)))
 
 # ---------------- batch: CSV -> ranked call list
@@ -129,9 +143,15 @@ with batch:
         else:
             for note in out_of_range(bundle, customers):
                 st.warning(note)
-            ranked = rank_call_list(bundle, customers)
-            n_call = int((ranked["recommendation"] == "call").sum())
+            ranked = rank_call_list(bundle, customers, rules)
+            counts = ranked["recommendation"].value_counts()
+            n_call = int(counts.get(CALL, 0))
             st.success(f"{n_call} of {len(ranked)} customers recommended for a call "
                        f"({n_call / len(ranked):.0%}); sorted from most to least likely buyer.")
+            summary = pd.DataFrame({"customers": [int(counts.get(a, 0)) for a in (CALL, BROCHURE, NO_ACTION)]},
+                                   index=[CALL, BROCHURE, NO_ACTION])
+            summary["share %"] = (summary["customers"] / len(ranked) * 100).round(1)
+            summary.loc["Overall"] = [len(ranked), 100.0]
+            st.dataframe(summary, use_container_width=False)
             st.dataframe(ranked, hide_index=True, use_container_width=True)
             st.download_button("Download call list", ranked.to_csv(index=False), "call_list.csv", "text/csv")

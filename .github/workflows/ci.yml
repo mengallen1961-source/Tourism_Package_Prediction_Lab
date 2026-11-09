@@ -1,0 +1,37 @@
+# ==============================================================
+# Cell L.9 | CI checks for pull requests
+# --------------------------------------------------------------
+# Purpose : Quality gate before a change reaches main. Runs the data
+#           contract, the data preparation and the tests on every pull
+#           request; it never trains, commits or deploys anything.
+# Input   : the pull request's code
+# Output  : a check shown on the pull request (pass / fail)
+# ==============================================================
+name: PR checks
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out the pull request
+        uses: actions/checkout@v6
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r tourism_project/requirements.txt -r tourism_project/deployment/requirements.txt pytest
+      - name: Data contract
+        run: python tourism_project/model_building/data_register.py
+      - name: Data preparation (fixed test split)
+        run: python tourism_project/model_building/prep.py
+      - name: Tests (scoring rules and app)
+        run: pytest tourism_project/tests -v -s

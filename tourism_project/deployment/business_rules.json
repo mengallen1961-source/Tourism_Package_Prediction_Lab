@@ -1,0 +1,6 @@
+{
+  "brochure_min_probability": 0.18,
+  "target_brochure_share": 0.15,
+  "calibrated_on": "fixed test split (510 customers), live model commit 0af6228",
+  "note": "The brochure band is the next 15% of customers after the call list: 76 of 510 test customers (14.9 %), who convert at 26.3 % against 22.7 % overall."
+}
