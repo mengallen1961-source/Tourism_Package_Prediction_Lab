@@ -1,0 +1,4 @@
+# Streamlit settings for every deployment of this repository (lab app and previews).
+# Community Cloud runs the app from the repository root, so this file sits at the root.
+[theme]
+base = "dark"

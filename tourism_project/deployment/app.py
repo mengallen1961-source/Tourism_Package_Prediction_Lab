@@ -1,10 +1,12 @@
 # ==============================================================
-# Cell L.7 | Streamlit app with the brochure action (Case 1)
+# Cell C2.6 | Streamlit app with a grouped, easier-to-check layout (Case 2)
 # --------------------------------------------------------------
-# Purpose : Same app as the submitted version, plus Case 1: every customer
-#           gets one of three actions (call / send brochure / no action);
-#           the batch tab summarises the list per action, and the sidebar
-#           shows the business rule next to the model card.
+# Purpose : Same model, rules and batch tab as Case 1; the single-customer
+#           tab is redesigned: inputs sit in titled cards by meaning
+#           (profile, work, travel habits, this enquiry), the review shows
+#           the same cards with readable values, and the result shows the
+#           probability, the action and where it sits between the two
+#           thresholds. The raw model input stays available as a DataFrame.
 # Input   : None (the app reads tourism_model.joblib, metrics.json and
 #           business_rules.json next to it, or from TOURISM_MODEL_DIR)
 # Output  : tourism_project/deployment/app.py
@@ -15,32 +17,11 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+from layout import YES_NO, format_value, group_features, help_text, label
 from scoring import (BROCHURE, CALL, NO_ACTION, load_bundle, load_report_card, load_rules, out_of_range,
                      rank_call_list, score, validate)
 
 MODEL_DIR = Path(os.environ.get("TOURISM_MODEL_DIR", Path(__file__).resolve().parent))
-
-LABELS = {   # friendly labels and help texts; unknown features fall back to their column name
-    "Age": ("Age", "Customer's age in years"),
-    "TypeofContact": ("Type of contact", "How the lead arrived"),
-    "CityTier": ("City tier", "1 = most developed city category, 3 = least"),
-    "Occupation": ("Occupation", None),
-    "Gender": ("Gender", None),
-    "NumberOfPersonVisiting": ("Persons travelling", "Total number of people on the trip"),
-    "PreferredPropertyStar": ("Preferred hotel rating", "Stars"),
-    "MaritalStatus": ("Marital status", None),
-    "NumberOfTrips": ("Trips per year", "Average number of trips per year"),
-    "Passport": ("Holds a passport", None),
-    "OwnCar": ("Owns a car", None),
-    "NumberOfChildrenVisiting": ("Children under 5 travelling", None),
-    "Designation": ("Designation", "Job level in the current organisation"),
-    "MonthlyIncome": ("Monthly income", "Gross monthly income"),
-    "ProductPitched": ("Product pitched", None),
-    "DurationOfPitch": ("Pitch duration (minutes)", "Known only after the first contact"),
-    "NumberOfFollowups": ("Follow-ups", "Known only after the first contact"),
-    "PitchSatisfactionScore": ("Pitch satisfaction (1-5)", "Known only after the first contact"),
-}
-YES_NO = {"Passport", "OwnCar"}
 
 st.set_page_config(page_title="Wellness Package Purchase Prediction", layout="wide")
 
@@ -63,11 +44,14 @@ if bundle is None:
     st.warning("No model has been deployed yet. The GitHub Actions pipeline commits the model here after its first run.")
     st.stop()
 
-# ---------------- sidebar: model card
+THRESHOLD = bundle["threshold"]
+FLOOR = rules.get("brochure_min_probability")
+
+# ---------------- sidebar: model card and business rule
 with st.sidebar:
     st.header("Live model")
     st.write(f"**Strategy:** {bundle['strategy']}  \n**Algorithm:** {bundle['algorithm']}  \n"
-             f"**Features:** {len(bundle['features'])}  \n**Decision threshold:** {bundle['threshold']:.2f}")
+             f"**Features:** {len(bundle['features'])}  \n**Decision threshold:** {THRESHOLD:.2f}")
     m = bundle["test_metrics"]
     c1, c2 = st.columns(2)
     c1.metric("Test F1", f"{m['f1']:.3f}")
@@ -79,59 +63,98 @@ with st.sidebar:
     if card:
         st.caption(f"Last pipeline decision: {card['last_decision']}")
     st.header("Business rule")
-    floor = rules.get("brochure_min_probability")
-    if floor is None:
+    if FLOOR is None:
         st.write("Below the threshold: no action.")
     else:
-        st.write(f"**Call:** probability \u2265 {bundle['threshold']:.2f}  \n"
-                 f"**Send brochure:** {floor:.2f} \u2264 probability < {bundle['threshold']:.2f}  \n"
-                 f"**No action:** probability < {floor:.2f}")
+        st.write(f"**Call:** probability ≥ {THRESHOLD:.2f}  \n"
+                 f"**Send brochure:** {FLOOR:.2f} ≤ probability < {THRESHOLD:.2f}  \n"
+                 f"**No action:** probability < {FLOOR:.2f}")
         st.caption(rules.get("note", ""))
 
+
+def input_widget(box, feature):
+    """One input, chosen from the feature's schema (radio, select box, slider or number box)."""
+    spec = bundle["input_schema"][feature]
+    name, tip = label(feature), help_text(feature)
+    if feature in YES_NO:
+        default = 1 if int(spec["default"]) == 1 else 0
+        return 1 if box.radio(name, ["No", "Yes"], index=default, horizontal=True, help=tip) == "Yes" else 0
+    if spec["type"] == "categorical":
+        levels = spec["levels"]
+        return box.selectbox(name, levels, index=levels.index(spec["default"]), help=tip)
+    if spec["integer"] and spec["max"] - spec["min"] <= 60:                 # e.g. age, trips, stars
+        return box.slider(name, int(spec["min"]), int(spec["max"]), int(spec["default"]), help=tip)
+    if spec["integer"]:                                                       # e.g. monthly income
+        return box.number_input(name, min_value=0, value=int(spec["default"]),
+                                step=500 if spec["max"] > 1000 else 1, help=tip)
+    return box.number_input(name, min_value=0.0, value=float(spec["default"]), help=tip)
+
+
+def in_pairs(items):
+    return [items[i:i + 2] for i in range(0, len(items), 2)]
+
+
+def action_bar(p):
+    """Probability bar with the brochure and call thresholds marked."""
+    marks = [(THRESHOLD, "call")] + ([(FLOOR, "brochure")] if FLOOR is not None else [])
+    ticks = "".join(
+        f'<div style="position:absolute;left:{x * 100:.1f}%;top:-4px;height:22px;border-left:2px dashed #888;"></div>'
+        f'<div style="position:absolute;left:{x * 100:.1f}%;top:20px;font-size:0.75rem;color:#999;'
+        f'transform:translateX(-50%);">{name} {x:.2f}</div>' for x, name in marks)
+    colour = "#21c354" if p >= THRESHOLD else ("#ffbd45" if FLOOR is not None and p >= FLOOR else "#8b8b9a")
+    return (f'<div style="position:relative;height:14px;background:rgba(128,128,128,0.25);border-radius:7px;margin:8px 0 34px 0;">'
+            f'<div style="width:{min(p, 1) * 100:.1f}%;height:100%;background:{colour};border-radius:7px;"></div>'
+            f'{ticks}</div>')
+
+
+groups = group_features(bundle["features"])
 single, batch = st.tabs(["Score one customer", "Score a customer list (CSV)"])
 
-# ---------------- single customer: form generated from the input schema
+# ---------------- single customer: inputs in titled cards, two cards per row, two fields per card
 with single:
     with st.form("customer"):
-        cols = st.columns(3)
         values = {}
-        for i, feature in enumerate(bundle["features"]):
-            spec = bundle["input_schema"][feature]
-            label, help_text = LABELS.get(feature, (feature, None))
-            box = cols[i % 3]
-            if feature in YES_NO:
-                values[feature] = 1 if box.radio(label, ["No", "Yes"], horizontal=True, help=help_text) == "Yes" else 0
-            elif spec["type"] == "categorical":
-                levels = spec["levels"]
-                values[feature] = box.selectbox(label, levels, index=levels.index(spec["default"]), help=help_text)
-            elif spec["integer"] and spec["max"] - spec["min"] <= 60:          # e.g. age, trips, stars
-                values[feature] = box.slider(label, int(spec["min"]), int(spec["max"]), int(spec["default"]), help=help_text)
-            elif spec["integer"]:                                                 # e.g. monthly income
-                values[feature] = box.number_input(label, min_value=0, value=int(spec["default"]),
-                                                   step=500 if spec["max"] > 1000 else 1, help=help_text)
-            else:
-                values[feature] = box.number_input(label, min_value=0.0, value=float(spec["default"]), help=help_text)
-        submitted = st.form_submit_button("Predict", type="primary")
+        for row in in_pairs(groups):
+            for column, (title, features) in zip(st.columns(2, gap="large"), row):
+                with column.container(border=True):
+                    st.markdown(f"#### {title}")
+                    for pair in in_pairs(features):
+                        for box, feature in zip(st.columns(2, gap="medium"), pair):
+                            values[feature] = input_widget(box, feature)
+        submitted = st.form_submit_button("Predict", type="primary", use_container_width=True)
 
     if submitted:
-        input_df = pd.DataFrame([values])                     # the inputs, saved into a dataframe
-        st.subheader("Input received by the model")
-        st.dataframe(input_df, hide_index=True, use_container_width=True)
-        for note in out_of_range(bundle, input_df):           # only free-typed numbers can leave the range
-            st.warning(note)
-        result = score(bundle, input_df, rules).iloc[0]
-        p, t = result["purchase_probability"], bundle["threshold"]
-        st.subheader("Prediction")
-        if result["recommendation"] == CALL:
-            st.success(f"Likely buyer - recommend a call. Purchase probability {p:.1%} (threshold {t:.0%}).")
-        elif result["recommendation"] == BROCHURE:
-            st.warning(f"Close to the threshold - send the wellness brochure. Purchase probability {p:.1%} "
-                       f"(brochure band {rules['brochure_min_probability']:.0%}-{t:.0%}).")
-        else:
-            st.info(f"Unlikely buyer - no action for now. Purchase probability {p:.1%} (threshold {t:.0%}).")
-        st.progress(float(min(p, 1.0)))
+        input_df = pd.DataFrame([values])[bundle["features"]]      # the inputs, saved into a dataframe
 
-# ---------------- batch: CSV -> ranked call list
+        st.subheader("Result")
+        result = score(bundle, input_df, rules).iloc[0]
+        p, action = float(result["purchase_probability"]), result["recommendation"]
+        left, right = st.columns([1, 2], gap="large")
+        left.metric("Purchase probability", f"{p:.1%}")
+        with right:
+            if action == CALL:
+                st.success(f"**CALL** - likely buyer (probability ≥ {THRESHOLD:.0%}).")
+            elif action == BROCHURE:
+                st.warning(f"**SEND BROCHURE** - close to the call threshold "
+                           f"({FLOOR:.0%}-{THRESHOLD:.0%}).")
+            else:
+                st.info(f"**NO ACTION** - unlikely buyer for now (probability < "
+                        f"{(FLOOR if FLOOR is not None else THRESHOLD):.0%}).")
+            st.markdown(action_bar(p), unsafe_allow_html=True)
+        for note in out_of_range(bundle, input_df):                  # only free-typed numbers can leave the range
+            st.warning(note)
+
+        st.subheader("Please check the inputs")
+        for row in in_pairs(groups):
+            for column, (title, features) in zip(st.columns(2, gap="large"), row):
+                with column.container(border=True):
+                    st.markdown(f"**{title}**")
+                    st.markdown("| Field | Value |\n|---|---|\n" + "\n".join(
+                        f"| {label(f)} | **{format_value(f, values[f])}** |" for f in features))
+        with st.expander("Model input (technical): the DataFrame passed to the model"):
+            st.dataframe(input_df, hide_index=True, use_container_width=True)
+
+# ---------------- batch: CSV -> ranked call list (unchanged from Case 1)
 with batch:
     st.write("Upload a CSV with one row per customer and the columns: " + ", ".join(f"`{f}`" for f in bundle["features"]))
     upload = st.file_uploader("Customer list", type="csv")
