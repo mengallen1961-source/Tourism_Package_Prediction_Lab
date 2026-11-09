@@ -118,10 +118,11 @@ jobs:
     if: needs.drift-check.outputs.retrain == 'true'
     runs-on: ubuntu-24.04
     steps:
-      - name: Check out the repository
+      - name: Check out the repository (deploy key, so the model commit can bypass the main ruleset)
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          ssh-key: ${{ secrets.DEPLOY_KEY }}
       - name: Set up Python 3.11
         uses: actions/setup-python@v6
         with:
